@@ -15,8 +15,15 @@ import os
 import pytest
 
 import pldm
-from pldm_helpers import assert_cc, next_inst_id, send_pldm_command, walk_pdrs
+from pldm_helpers import (
+    assert_cc,
+    catch_async_pldm_event,
+    next_inst_id,
+    send_pldm_command,
+    walk_pdrs,
+)
 from config import (
+    OUR_EID,
     COMPOSITE_COUNT,
     LED_OFF,
     LED_ON,
@@ -164,6 +171,47 @@ def test_state_effecter_led_set_and_readback(bridge):
         if original_state in (LED_ON, LED_OFF):
             send_pldm_command(bridge, pldm.build_set_state_effecter_states(
                 STATE_EFFECTER_ID, [(1, original_state)], inst_id=next_inst_id()))
+
+
+@_needs_human
+def test_async_platform_event_message_on_sw2(bridge):
+    """SetEventReceiver + an SW2 state-sensor event: register this host
+    as the PLDM event receiver, then have the board push an async
+    PlatformEventMessage (0x0A) for sensor 0x0002 -- either a real SW2
+    press (debounce handler fires it) or `plat pldm2 evt fire` on the
+    OpenBIC console. We catch it as an armed I2C target, decode it, and
+    ack it.
+
+    Interactive + needs the firmware peer at the console. NOTE:
+    SetEventReceiver state is RAM-only, so if the board rebooted since,
+    it must be re-sent (this test does that). Confirmed working live
+    2026-08-28: caught `01 80 02 0a 01 86 00 02 00 01 00 02 02`.
+    """
+    r = send_pldm_command(bridge, pldm.build_set_event_receiver(
+        global_enable=pldm.EVENT_ENABLE_ASYNC, transport_type=0x00,
+        eid=OUR_EID, inst_id=next_inst_id()))
+    assert_cc(r, pldm.CC_SUCCESS, "SetEventReceiver(enableAsync, MCTP, our EID)")
+
+    input("\n>>> On the OpenBIC console run:  for i in $(seq 15); do plat pldm2 evt fire; sleep 1; done\n"
+          "    (or press SW2 repeatedly for ~20s), then press Enter here... ")
+    evt = catch_async_pldm_event(bridge, timeout_s=100)
+
+    assert evt["cmd"] == pldm.CMD_PLATFORM_EVENT_MESSAGE
+    assert evt["is_request"], "PlatformEventMessage should arrive as a request (rq=1)"
+    assert evt["event_class"] == pldm.EVENT_CLASS_SENSOR, (
+        f"expected sensorEvent (0x00), got 0x{evt['event_class']:02x}"
+    )
+    assert evt["sensor_id"] == STATE_SENSOR_ID, (
+        f"event for sensor 0x{evt['sensor_id']:04x}, expected SW2 0x{STATE_SENSOR_ID:04x}"
+    )
+    assert evt["sensor_event_class_type"] == pldm.SENSOR_EVENT_STATE, (
+        f"expected stateSensorState (0x01), got 0x{evt['sensor_event_class_type']:02x}"
+    )
+    assert evt["event_state"] in (SW2_PRESENT, SW2_NOT_PRESENT), (
+        f"eventState {evt['event_state']} isn't a valid Presence state"
+    )
+    print(f"async SW2 event: state {evt['previous_event_state']} -> {evt['event_state']}, "
+          f"TID 0x{evt['tid']:02x}")
 
 
 @_needs_human

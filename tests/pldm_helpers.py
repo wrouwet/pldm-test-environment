@@ -105,6 +105,50 @@ def send_pldm_command(bridge, message_body, max_fragments=16, max_drain=3):
     return decoded
 
 
+def catch_async_pldm_event(bridge, timeout_s=90):
+    """Sit as an armed I2C target at OUR_I2C_ADDR and capture the first
+    inbound PLDM PlatformEventMessage (0x0A) the target pushes to us,
+    then send it a completion ack. Returns pldm.parse_platform_event_
+    message(...).
+
+    Bridge listen() is one-shot (arms ~4s then returns), so this loops
+    it back-to-back -- the caller must arrange for the target to fire
+    repeatedly across the window so one push lands while we're armed.
+    """
+    import time
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            raw = bridge.listen(OUR_I2C_ADDR)
+        except Exception:
+            continue
+        if not raw:
+            continue
+        try:
+            data, pec = raw[:-1], raw[-1]
+            exp = mctp.smbus_pec_buf(mctp.smbus_pec_byte(0, (OUR_I2C_ADDR << 1) | 0), data)
+            assert exp == pec, f"PEC {exp:02x} != {pec:02x}"
+            _, packet = mctp.parse_smbus_block_wrapper(data)
+            hdr = mctp.parse_transport_header(packet)
+            evt = pldm.parse_platform_event_message(packet[4:])
+        except (ValueError, AssertionError):
+            continue
+        if evt.get("cmd") != pldm.CMD_PLATFORM_EVENT_MESSAGE:
+            continue
+        print(f"caught PlatformEventMessage: mctp={hdr}  evt={evt}")
+        try:
+            resp = pldm.build_platform_event_message_response(evt["inst_id"])
+            th = mctp.build_transport_header(hdr["src_eid"], hdr["dest_eid"],
+                                             msg_tag=hdr["msg_tag"], tag_owner=0, som=1, eom=1)
+            wrapper = mctp.build_smbus_block_wrapper(OUR_I2C_ADDR, th + resp)
+            bridge.smbus_write(MCTP_TARGET_ADDR, wrapper + th + resp)
+        except Exception as exc:
+            print(f"(ack send failed, non-fatal: {exc})")
+        return evt
+    raise AssertionError(f"no PlatformEventMessage within {timeout_s}s "
+                         f"(is the target firing, and was SetEventReceiver re-sent since the last reboot?)")
+
+
 def assert_cc(decoded, expected, note=""):
     actual = decoded["completion_code"]
     suffix = f" ({note})" if note else ""

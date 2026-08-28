@@ -436,6 +436,82 @@ def scale_reading(raw, resolution, offset, unit_modifier):
     return val * (10 ** unit_modifier)
 
 
+EVENT_ENABLE_DISABLE = 0x00
+EVENT_ENABLE_ASYNC = 0x01
+EVENT_ENABLE_POLLING = 0x02
+EVENT_ENABLE_ASYNC_KEEPALIVE = 0x03
+
+# PlatformEventMessage eventClass values (DSP0248 table).
+EVENT_CLASS_SENSOR = 0x00           # sensorEvent (eventData starts with sensorID)
+EVENT_CLASS_EFFECTER = 0x01
+EVENT_CLASS_REDFISH_TASK = 0x02
+EVENT_CLASS_REDFISH_MSG = 0x03
+EVENT_CLASS_PLDM_PDR_REPO_CHG = 0x04
+EVENT_CLASS_HEARTBEAT = 0x05
+
+# Within a sensorEvent, eventData[2] = sensorEventClassType.
+SENSOR_EVENT_OP_STATE = 0x00
+SENSOR_EVENT_STATE = 0x01           # stateSensorState
+SENSOR_EVENT_NUMERIC = 0x02
+
+
+def build_set_event_receiver(global_enable=EVENT_ENABLE_ASYNC, transport_type=0x00,
+                             eid=0x08, heartbeat=0, inst_id=0):
+    """SetEventReceiver (0x04): eventMessageGlobalEnable(1)
+    transportProtocolType(1, 0x00 = MCTP) eventReceiverAddressInfo(1, the
+    MCTP EID) [heartbeatTimer(2 LE) if KEEPALIVE]."""
+    data = bytes([global_enable & 0xFF, transport_type & 0xFF, eid & 0xFF])
+    if global_enable == EVENT_ENABLE_ASYNC_KEEPALIVE:
+        data += struct.pack("<H", heartbeat)
+    return build_request(CMD_SET_EVENT_RECEIVER, PLDM_TYPE_PLATFORM, data, inst_id)
+
+
+def parse_platform_event_message(body):
+    """Parse an inbound PlatformEventMessage (0x0A) REQUEST the target
+    pushed to us: PLDM header + formatVersion(1) TID(1) eventClass(1)
+    eventData(N). For a stateSensorState event (class 0x01) eventData is
+    sensorID(2 LE) sensorEventClassType(1) sensorOffset(1) eventState(1)
+    previousEventState(1)."""
+    if len(body) < 4 or (body[0] & 0x7F) != MSG_TYPE_PLDM:
+        raise ValueError(f"not a PLDM message: {body[:8].hex(' ')}")
+    is_request = (body[1] >> 7) & 0x1
+    cmd = body[3]
+    payload = body[4:]
+    out = {
+        "is_request": bool(is_request),
+        "inst_id": body[1] & 0x1F,
+        "cmd": cmd,
+        "format_version": payload[0] if len(payload) > 0 else None,
+        "tid": payload[1] if len(payload) > 1 else None,
+        "event_class": payload[2] if len(payload) > 2 else None,
+        "event_data": bytes(payload[3:]),
+    }
+    ed = out["event_data"]
+    # sensorEvent (eventClass 0x00): sensorID(2 LE) sensorEventClassType(1)
+    # then, for stateSensorState (type 0x01): sensorOffset(1) eventState(1)
+    # previousEventState(1). Confirmed on the wire 2026-08-28 from a live
+    # SW2 async push: `02 00 01 00 02 02`.
+    if out["event_class"] == EVENT_CLASS_SENSOR and len(ed) >= 3:
+        out["sensor_id"] = struct.unpack_from("<H", ed, 0)[0]
+        out["sensor_event_class_type"] = ed[2]
+        if out["sensor_event_class_type"] == SENSOR_EVENT_STATE and len(ed) >= 6:
+            out["sensor_offset"] = ed[3]
+            out["event_state"] = ed[4]
+            out["previous_event_state"] = ed[5]
+    return out
+
+
+def build_platform_event_message_response(inst_id, completion_code=CC_SUCCESS,
+                                          platform_event_status=0x00):
+    """Response to acknowledge a received PlatformEventMessage (0x0A):
+    completionCode(1) platformEventStatus(1)."""
+    msg_type_ic = MSG_TYPE_PLDM & 0x7F
+    rq_d_inst = (0 << 7) | (inst_id & 0x1F)          # rq = 0 (response)
+    ver_type = (0 << 6) | (PLDM_TYPE_PLATFORM & 0x3F)
+    return bytes([msg_type_ic, rq_d_inst, ver_type, CMD_PLATFORM_EVENT_MESSAGE,
+                  completion_code & 0xFF, platform_event_status & 0xFF])
+
+
 def build_get_state_sensor_readings(sensor_id, rearm=0, inst_id=0):
     return build_request(CMD_GET_STATE_SENSOR_READINGS, PLDM_TYPE_PLATFORM,
                          struct.pack("<H", sensor_id) + bytes([rearm & 0xFF, 0x00]), inst_id)
