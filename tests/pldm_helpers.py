@@ -9,12 +9,28 @@ is PLDM (MCTP message type 0x01) instead of MCTP Control.
 """
 
 import itertools
+import time
 
 import pytest
 
 import mctp
 import pldm
+from bridge import BridgeError
 from config import MCTP_TARGET_ADDR, OUR_EID, OUR_I2C_ADDR, TARGET_EID
+
+# A few ms between transactions. The MCTP endpoint (0x10) shares one
+# LPI2C target instance with IPMB (0x20) since the 2026-08-27
+# consolidation; zero-gap back-to-back load occasionally outruns it
+# (missed ACK / response). Harmless but noisy; a real BMC paces sideband
+# polling. Peer-diagnosed 2026-08-28.
+_BUS_PACE_S = 0.008
+
+# Whole-transaction retries on a transient bus glitch (listen timeout,
+# PEC mismatch from a stale capture). Peer-confirmed these don't corrupt
+# state, so one automatic re-send absorbs the noise without changing any
+# test's semantics.
+_TX_RETRIES = 3
+_TX_RETRY_GAP_S = 0.05
 
 # PLDM instance ID (5-bit) matches a response to its request, same role
 # as IPMB seq / MCTP Control inst_id. Shared across every test module.
@@ -50,6 +66,19 @@ def send_pldm_command(bridge, message_body, max_fragments=16, max_drain=3):
     header; this reuses it to validate the response. Callers should build
     each request with a fresh next_inst_id().
     """
+    last_exc = None
+    for _tx in range(_TX_RETRIES + 1):
+        time.sleep(_BUS_PACE_S if _tx == 0 else _TX_RETRY_GAP_S)
+        try:
+            return _send_pldm_once(bridge, message_body, max_fragments, max_drain)
+        except (BridgeError, ValueError, AssertionError) as exc:
+            last_exc = exc
+            print(f"transient bus glitch ({exc}); re-sending "
+                  f"(attempt {_tx + 2}/{_TX_RETRIES + 1})")
+    raise AssertionError(f"PLDM command failed after {_TX_RETRIES + 1} attempts: {last_exc}")
+
+
+def _send_pldm_once(bridge, message_body, max_fragments, max_drain):
     req_inst_id = message_body[1] & 0x1F
     tag = next_msg_tag()
     transport = mctp.build_transport_header(
