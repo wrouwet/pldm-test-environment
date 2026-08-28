@@ -18,15 +18,17 @@ import pldm
 from pldm_helpers import assert_cc, next_inst_id, not_implemented, send_pldm_command, walk_pdrs
 from config import (
     COMPOSITE_COUNT,
-    DIE_TEMP_MAX_C,
-    DIE_TEMP_MIN_C,
     LED_OFF,
     LED_ON,
     NUMERIC_SENSOR_ID,
+    NUMERIC_SENSOR_UNIT_DEGC,
+    NUMERIC_SENSOR_UNIT_VOLTS,
     STATE_EFFECTER_ID,
     STATE_SENSOR_ID,
     SW2_NOT_PRESENT,
     SW2_PRESENT,
+    VOLTAGE_MAX_MV,
+    VOLTAGE_MIN_MV,
 )
 
 INTERACTIVE = os.environ.get("PLDM_INTERACTIVE") == "1"
@@ -55,7 +57,11 @@ def test_numeric_sensor_reading_roundtrips(bridge):
         f"Numeric Sensor PDR sensor_id 0x{pdr.get('sensor_id'):04x} != expected "
         f"0x{NUMERIC_SENSOR_ID:04x} -- PDR field offsets likely wrong"
     )
-    assert pdr.get("base_unit") == 2, f"expected baseUnit=2 (degrees C), got {pdr.get('base_unit')}"
+    # Unit is in transition: degC(2) on the old build, Volts(5) once
+    # sensor 0x0001 is repointed to the LPADC single-ended read.
+    assert pdr.get("base_unit") in (NUMERIC_SENSOR_UNIT_DEGC, NUMERIC_SENSOR_UNIT_VOLTS), (
+        f"unexpected baseUnit {pdr.get('base_unit')} (expected 2=degC or 5=Volts)"
+    )
 
     d = send_pldm_command(bridge, pldm.build_get_sensor_reading(NUMERIC_SENSOR_ID, inst_id=next_inst_id()))
     assert_cc(d, pldm.CC_SUCCESS)
@@ -71,28 +77,35 @@ def test_numeric_sensor_reading_roundtrips(bridge):
 
 
 @not_implemented(
-    "die-temp scaling formula unconfirmed: GetSensorReading returns raw sint32 "
-    "~170000, Numeric Sensor PDR gives resolution=1.0 / offset=0.0 / unitModifier=-3 "
-    "/ baseUnit=degC -> ~170 C, but the firmware shell reports ~26 C. Awaiting the "
-    "firmware peer's confirmation of the actual raw->degC conversion (PDR resolution "
-    "looks like a placeholder)."
+    "sensor 0x0001 is being repointed from the (broken) MCXN947 on-die temp "
+    "sensor to a plain LPADC single-ended voltage read reporting millivolts "
+    "(baseUnit=Volts, unitModifier=-3). Confirmed w/ firmware peer 2026-08-27: "
+    "the old degC path was a real firmware bug (nxp,lpadc-temp40 + generic "
+    "adc_read don't drive the LPADC internal temp conversion). Stays xfail "
+    "until the async-events batch flash lands the new voltage PDR; then this "
+    "becomes a real mV sanity check and the marker comes off."
 )
-def test_numeric_sensor_die_temperature_scaled(bridge):
-    """GetSensorReading scaled to degrees C via the Numeric Sensor PDR,
-    sanity-checked against a plausible ambient window. xfail until the
-    conversion is confirmed -- see the marker reason.
+def test_numeric_sensor_reading_scaled(bridge):
+    """GetSensorReading scaled via the Numeric Sensor PDR, sanity-checked
+    against a plausible window. Post-repoint: sensor 0x0001 reports
+    millivolts, so the value should land in 0..full-scale ADC range.
     """
     pdr = _find_numeric_sensor_pdr(bridge)
     d = send_pldm_command(bridge, pldm.build_get_sensor_reading(NUMERIC_SENSOR_ID, inst_id=next_inst_id()))
     assert_cc(d, pldm.CC_SUCCESS)
     r = pldm.parse_get_sensor_reading(d["data"])
-    celsius = pldm.scale_reading(
+    value = pldm.scale_reading(
         r["present_reading_raw"], pdr.get("resolution", 1.0),
         pdr.get("offset", 0.0), pdr.get("unit_modifier", 0),
     )
-    print(f"die temperature = {celsius:.1f} C  (raw {r['present_reading_raw']})")
-    assert DIE_TEMP_MIN_C <= celsius <= DIE_TEMP_MAX_C, (
-        f"die temp {celsius:.1f} C outside the plausible {DIE_TEMP_MIN_C}-{DIE_TEMP_MAX_C} C window"
+    unit = {2: "degC", 5: "V"}.get(pdr.get("base_unit"), f"unit{pdr.get('base_unit')}")
+    print(f"scaled reading = {value:.3f} {unit}  (raw {r['present_reading_raw']}, "
+          f"m={pdr.get('resolution')} b={pdr.get('offset')} 10^{pdr.get('unit_modifier')})")
+    # After the repoint the value is millivolts (unitModifier -3 => base
+    # unit already applied), so expect it in the ADC's mV full-scale range.
+    assert VOLTAGE_MIN_MV <= value * 1000 <= VOLTAGE_MAX_MV, (
+        f"scaled reading {value} {unit} outside the plausible "
+        f"{VOLTAGE_MIN_MV}-{VOLTAGE_MAX_MV} mV window"
     )
 
 

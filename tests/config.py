@@ -44,9 +44,25 @@ PDR_MAP = {
 
 # Sensors/effecters are addressed by these ids in the command payload,
 # NOT by PDR record handle (DSP0248).
-NUMERIC_SENSOR_ID = 0x0001      # die temperature
+NUMERIC_SENSOR_ID = 0x0001      # numeric sensor (see note below)
 STATE_SENSOR_ID = 0x0002       # SW2 button
 STATE_EFFECTER_ID = 0x0003     # green LED
+
+# Numeric sensor 0x0001 history: shipped as an MCXN947 on-die
+# temperature sensor, but the nxp,lpadc-temp40 driver + generic
+# adc_read don't correctly drive the LPADC internal temp conversion
+# (needs a specific CMDL loop/averaging for the VBE1/VBE8 pair), so the
+# raw was unreliable and wrongly scaled -- confirmed a firmware bug with
+# the peer 2026-08-27, not a test misread. Being repointed to a plain
+# LPADC single-ended VOLTAGE read: same sensor id / PDR handle 2, PDR
+# body changes to baseUnit=Volts(5), unitModifier=-3 (=> raw is
+# millivolts). New PDR bytes land with the async-events batch flash.
+NUMERIC_SENSOR_UNIT_VOLTS = 5   # PLDM baseUnit enum: Volts
+NUMERIC_SENSOR_UNIT_DEGC = 2    # PLDM baseUnit enum: degrees C (the old, broken meaning)
+# Plausible window for the single-ended mV read once repointed (0..full
+# scale for a 3.3V-referenced LPADC, generous).
+VOLTAGE_MIN_MV = 0.0
+VOLTAGE_MAX_MV = 3600.0
 
 # State Sensor SW2: state set 13 (Presence). 1 = present (pressed),
 # 2 = not-present (released).
