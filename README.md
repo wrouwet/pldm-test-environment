@@ -91,8 +91,15 @@ same "keep each repo independently clonable" choice as the siblings.
 
 ## Status
 
-First-contact against real hardware: firmware `v4.4.0-3-gf984613ef61c`
-(wrouwet/OpenBIC full-board-port `77c73bd0`). Treat any new response
-shape as first-contact integration, per this project family's rhythm —
-the PDR field offsets for scaling in particular are checked, not
-trusted.
+Hardware-verified against `wrouwet/OpenBIC` `full-board-port` @
+`a210e2b7`: **16 passed / 3 skipped** (the skips are interactive —
+`PLDM_INTERACTIVE=1` plus someone at the OpenBIC console).
+
+Confirmed live 2026-08-28 in a coordinated session with the firmware
+peer: the full 4-record PDR walk, numeric + state sensors, LED effecter
+round-trip, the async `PlatformEventMessage` path (`SetEventReceiver` →
+SW2 event → caught as an armed I2C target → acked), and PLDM TID NVS
+persistence across `kernel reboot cold`. Numeric Sensor PDR field
+offsets (sensorDataSize / resolution / offset) are cross-checked against
+`GetSensorReading`, not trusted. `SetEventReceiver` state is RAM-only —
+it must be re-sent after any board reset.
