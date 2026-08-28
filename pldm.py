@@ -5,7 +5,8 @@ Sibling to ipmi-test-environment / mctp-test-environment / spdm-test-
 environment: same host-PC-through-the-FRDM-MCXA153-bridge setup, same
 "responder becomes bus master and writes the response back to the
 requester" capture pattern, same test style. This one exercises PLDM
-carried as MCTP message type 0x01.
+carried as MCTP message type 0x01. Also vendored verbatim into
+openbic-discovery for its PLDM/PDR section.
 
 PLDM message body layout (what a builder here returns -- the msg-type/IC
 byte onward; hand straight to pldm_helpers.send_pldm_command(), which
@@ -349,13 +350,19 @@ def parse_state_sensor_pdr(body):
     possibleStates(N)."""
     if len(body) < 14:
         return {"raw": body.hex(" ")}
+    # State Sensor PDR body (DSP0248): terminusHandle(2) sensorID(2)
+    # entityType(2) entityInstance(2) containerID(2) sensorInit(1)
+    # sensorAuxNamesPDR(1) compositeSensorCount(1)@12 then per sensor
+    # stateSetID(2)@13 possibleStatesSize(1) possibleStates(N). (No
+    # semanticID field -- that's effecter-only.) Offset confirmed live
+    # 2026-08-28 via openbic-discovery's PDR dump.
     out = {
         "sensor_id": struct.unpack_from("<H", body, 2)[0],
         "entity_type": struct.unpack_from("<H", body, 4)[0],
-        "composite_sensor_count": body[13],
+        "composite_sensor_count": body[12],
         "state_sets": [],
     }
-    off = 14
+    off = 13
     for _ in range(out["composite_sensor_count"]):
         if off + 3 > len(body):
             break
