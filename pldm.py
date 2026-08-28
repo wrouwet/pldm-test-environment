@@ -84,6 +84,8 @@ BASE_CMD_NAMES = {
 }
 
 # ----- platform (type 0x02, DSP0248) commands -------------------------
+CMD_SET_EVENT_RECEIVER = 0x04
+CMD_PLATFORM_EVENT_MESSAGE = 0x0A
 CMD_GET_SENSOR_READING = 0x11
 CMD_GET_STATE_SENSOR_READINGS = 0x21
 CMD_SET_STATE_EFFECTER_STATES = 0x39
@@ -92,6 +94,7 @@ CMD_GET_PDR_REPOSITORY_INFO = 0x50
 CMD_GET_PDR = 0x51
 
 PLATFORM_CMD_NAMES = {
+    0x04: "SetEventReceiver", 0x0A: "PlatformEventMessage",
     0x11: "GetSensorReading", 0x21: "GetStateSensorReadings",
     0x39: "SetStateEffecterStates", 0x3A: "GetStateEffecterStates",
     0x50: "GetPDRRepositoryInfo", 0x51: "GetPDR",

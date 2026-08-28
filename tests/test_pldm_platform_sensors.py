@@ -15,7 +15,7 @@ import os
 import pytest
 
 import pldm
-from pldm_helpers import assert_cc, next_inst_id, not_implemented, send_pldm_command, walk_pdrs
+from pldm_helpers import assert_cc, next_inst_id, send_pldm_command, walk_pdrs
 from config import (
     COMPOSITE_COUNT,
     LED_OFF,
@@ -57,10 +57,8 @@ def test_numeric_sensor_reading_roundtrips(bridge):
         f"Numeric Sensor PDR sensor_id 0x{pdr.get('sensor_id'):04x} != expected "
         f"0x{NUMERIC_SENSOR_ID:04x} -- PDR field offsets likely wrong"
     )
-    # Unit is in transition: degC(2) on the old build, Volts(5) once
-    # sensor 0x0001 is repointed to the LPADC single-ended read.
-    assert pdr.get("base_unit") in (NUMERIC_SENSOR_UNIT_DEGC, NUMERIC_SENSOR_UNIT_VOLTS), (
-        f"unexpected baseUnit {pdr.get('base_unit')} (expected 2=degC or 5=Volts)"
+    assert pdr.get("base_unit") == NUMERIC_SENSOR_UNIT_VOLTS, (
+        f"expected baseUnit=5 (Volts) since the v4.4.0-4 repoint, got {pdr.get('base_unit')}"
     )
 
     d = send_pldm_command(bridge, pldm.build_get_sensor_reading(NUMERIC_SENSOR_ID, inst_id=next_inst_id()))
@@ -76,36 +74,29 @@ def test_numeric_sensor_reading_roundtrips(bridge):
     assert r["present_reading_raw"] is not None, "no present reading in the response"
 
 
-@not_implemented(
-    "sensor 0x0001 is being repointed from the (broken) MCXN947 on-die temp "
-    "sensor to a plain LPADC single-ended voltage read reporting millivolts "
-    "(baseUnit=Volts, unitModifier=-3). Confirmed w/ firmware peer 2026-08-27: "
-    "the old degC path was a real firmware bug (nxp,lpadc-temp40 + generic "
-    "adc_read don't drive the LPADC internal temp conversion). Stays xfail "
-    "until the async-events batch flash lands the new voltage PDR; then this "
-    "becomes a real mV sanity check and the marker comes off."
-)
 def test_numeric_sensor_reading_scaled(bridge):
-    """GetSensorReading scaled via the Numeric Sensor PDR, sanity-checked
-    against a plausible window. Post-repoint: sensor 0x0001 reports
-    millivolts, so the value should land in 0..full-scale ADC range.
+    """GetSensorReading on sensor 0x0001 scaled via its Numeric Sensor
+    PDR (resolution/offset/unitModifier) and sanity-checked. Post-repoint
+    (v4.4.0-4) this is a single-ended LPADC voltage read: raw is
+    millivolts, applied = raw * 10^-3 V. The input pin is floating, so
+    the value drifts near vref between reads -- the window is wide on
+    purpose; this guards against the scaling being wrong, not against
+    the pin being unconnected.
     """
     pdr = _find_numeric_sensor_pdr(bridge)
     d = send_pldm_command(bridge, pldm.build_get_sensor_reading(NUMERIC_SENSOR_ID, inst_id=next_inst_id()))
     assert_cc(d, pldm.CC_SUCCESS)
     r = pldm.parse_get_sensor_reading(d["data"])
-    value = pldm.scale_reading(
+    volts = pldm.scale_reading(
         r["present_reading_raw"], pdr.get("resolution", 1.0),
         pdr.get("offset", 0.0), pdr.get("unit_modifier", 0),
     )
-    unit = {2: "degC", 5: "V"}.get(pdr.get("base_unit"), f"unit{pdr.get('base_unit')}")
-    print(f"scaled reading = {value:.3f} {unit}  (raw {r['present_reading_raw']}, "
+    millivolts = volts * 1000
+    print(f"scaled reading = {volts:.3f} V ({millivolts:.0f} mV)  (raw {r['present_reading_raw']}, "
           f"m={pdr.get('resolution')} b={pdr.get('offset')} 10^{pdr.get('unit_modifier')})")
-    # After the repoint the value is millivolts (unitModifier -3 => base
-    # unit already applied), so expect it in the ADC's mV full-scale range.
-    assert VOLTAGE_MIN_MV <= value * 1000 <= VOLTAGE_MAX_MV, (
-        f"scaled reading {value} {unit} outside the plausible "
-        f"{VOLTAGE_MIN_MV}-{VOLTAGE_MAX_MV} mV window"
+    assert VOLTAGE_MIN_MV <= millivolts <= VOLTAGE_MAX_MV, (
+        f"scaled reading {millivolts:.0f} mV outside the plausible "
+        f"{VOLTAGE_MIN_MV}-{VOLTAGE_MAX_MV} mV window -- scaling likely wrong"
     )
 
 
